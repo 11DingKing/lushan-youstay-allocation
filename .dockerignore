@@ -1,0 +1,9 @@
+.git
+.gitignore
+.gomark-authoring
+.cache
+data
+*.db
+*.db-shm
+*.db-wal
+coverage.out
