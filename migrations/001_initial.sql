@@ -1,0 +1,174 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('guest','frontdesk','cleaner','maintenance','camp_guard','operator')),
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_expiry ON sessions(user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS properties (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  zone TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open','weather_closed','maintenance_closed')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS resources (
+  id TEXT PRIMARY KEY,
+  property_id TEXT NOT NULL REFERENCES properties(id),
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('villa_room','mountain_room','rv_berth','camp_site')),
+  capacity INTEGER NOT NULL CHECK (capacity > 0),
+  base_price_cents INTEGER NOT NULL CHECK (base_price_cents >= 0),
+  status TEXT NOT NULL CHECK (status IN ('open','held','occupied','cleaning','faulted','closed')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_resources_property_kind ON resources(property_id, kind, status);
+
+CREATE TABLE IF NOT EXISTS stays (
+  id TEXT PRIMARY KEY,
+  guest_id TEXT NOT NULL REFERENCES users(id),
+  resource_id TEXT NOT NULL REFERENCES resources(id),
+  status TEXT NOT NULL CHECK (status IN ('inquiry','held','guaranteed','checked_in','checked_out','settling','settled','cancelled','expired','relocated')),
+  check_in_date TEXT NOT NULL,
+  check_out_date TEXT NOT NULL,
+  party_size INTEGER NOT NULL CHECK (party_size > 0),
+  quoted_cents INTEGER NOT NULL CHECK (quoted_cents >= 0),
+  guarantee_cents INTEGER NOT NULL DEFAULT 0 CHECK (guarantee_cents >= 0),
+  hold_expires_at TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stays_resource_dates ON stays(resource_id, check_in_date, check_out_date, status);
+
+CREATE TABLE IF NOT EXISTS stay_nights (
+  stay_id TEXT NOT NULL REFERENCES stays(id) ON DELETE CASCADE,
+  resource_id TEXT NOT NULL REFERENCES resources(id),
+  night TEXT NOT NULL,
+  price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+  status TEXT NOT NULL CHECK (status IN ('held','reserved','occupied','released')),
+  PRIMARY KEY(stay_id, night),
+  UNIQUE(resource_id, night)
+);
+
+CREATE TABLE IF NOT EXISTS identity_checks (
+  id TEXT PRIMARY KEY,
+  stay_id TEXT NOT NULL REFERENCES stays(id),
+  guest_id TEXT NOT NULL REFERENCES users(id),
+  document_digest TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','verified','rejected')),
+  verified_by TEXT REFERENCES users(id),
+  verified_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(stay_id, guest_id)
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+  id TEXT PRIMARY KEY,
+  stay_id TEXT NOT NULL REFERENCES stays(id),
+  provider TEXT NOT NULL,
+  provider_event_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+  kind TEXT NOT NULL CHECK (kind IN ('guarantee','charge','refund')),
+  status TEXT NOT NULL CHECK (status IN ('pending','succeeded','failed')),
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(provider, provider_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS operational_tasks (
+  id TEXT PRIMARY KEY,
+  stay_id TEXT REFERENCES stays(id),
+  resource_id TEXT NOT NULL REFERENCES resources(id),
+  kind TEXT NOT NULL CHECK (kind IN ('cleaning','inspection','repair','relocation')),
+  status TEXT NOT NULL CHECK (status IN ('pending','claimed','completed','failed')),
+  assigned_role TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON operational_tasks(status, available_at);
+
+CREATE TABLE IF NOT EXISTS damage_claims (
+  id TEXT PRIMARY KEY,
+  stay_id TEXT NOT NULL REFERENCES stays(id),
+  task_id TEXT NOT NULL REFERENCES operational_tasks(id),
+  assessed_by TEXT NOT NULL REFERENCES users(id),
+  description TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+  status TEXT NOT NULL CHECK (status IN ('draft','accepted','disputed','waived')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS refund_settlements (
+  id TEXT PRIMARY KEY,
+  stay_id TEXT NOT NULL UNIQUE REFERENCES stays(id),
+  paid_cents INTEGER NOT NULL,
+  damage_cents INTEGER NOT NULL,
+  refund_cents INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','processing','completed','failed')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id TEXT,
+  request_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  result TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_object ON audit_events(object_type, object_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+  id TEXT PRIMARY KEY,
+  topic TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','processing','sent','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox_events(status, available_at);
+
