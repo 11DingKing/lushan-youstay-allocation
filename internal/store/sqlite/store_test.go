@@ -406,3 +406,75 @@ func TestDatabaseStateSurvivesReopen(t *testing.T) {
 		t.Fatalf("reopened property = %#v", loaded)
 	}
 }
+
+func checkedOutStay(t *testing.T, store *storesqlite.Store, stayID, key, guestID, resourceID string, now time.Time) domain.Stay {
+	t.Helper()
+	stay := heldStay(stayID, key, guestID, resourceID, now)
+	if err := store.CreateHeldStay(context.Background(), stay, []string{"2026-09-01", "2026-09-02"}, audit(now, stay.ID)); err != nil {
+		t.Fatalf("CreateHeldStay() error = %v", err)
+	}
+	guaranteed, _ := stay.Transition(domain.StayGuaranteed, now)
+	guaranteed.GuaranteeCents = 40_000
+	check := domain.IdentityCheck{ID: "check_" + stayID, StayID: stay.ID, GuestID: guestID, DocumentDigest: "digestdigestdigest", Status: domain.IdentityVerified, VerifiedBy: &guestID, VerifiedAt: &now, CreatedAt: now}
+	payment := domain.Payment{ID: "pay_" + stayID, StayID: stay.ID, Provider: "mock", ProviderEventID: "evt_" + stayID, AmountCents: 40_000, Kind: domain.PaymentGuarantee, Status: domain.PaymentSucceeded, OccurredAt: now, CreatedAt: now}
+	if err := store.GuaranteeStay(context.Background(), guaranteed, check, payment, audit(now, stay.ID)); err != nil {
+		t.Fatalf("GuaranteeStay() error = %v", err)
+	}
+	checkedIn, _ := guaranteed.Transition(domain.StayCheckedIn, now)
+	if err := store.TransitionStay(context.Background(), checkedIn, audit(now, stay.ID)); err != nil {
+		t.Fatalf("TransitionStay(checked_in) error = %v", err)
+	}
+	checkedOut, _ := checkedIn.Transition(domain.StayCheckedOut, now)
+	task := domain.OperationalTask{ID: "task_" + stayID, StayID: &stay.ID, ResourceID: resourceID, Kind: domain.TaskCleaning, Status: domain.TaskPending, AssignedRole: "cleaner", AvailableAt: now, CreatedAt: now, UpdatedAt: now}
+	if err := store.CheckoutAndCreateCleaning(context.Background(), checkedOut, task, audit(now, stay.ID)); err != nil {
+		t.Fatalf("CheckoutAndCreateCleaning() error = %v", err)
+	}
+	return checkedOut
+}
+
+func TestCreateSettlementRejectsDuplicateForSameStay(t *testing.T) {
+	store := openStore(t)
+	user := createUser(t, store, "guest1", "guest", auth.RoleGuest)
+	_, resource := createCatalog(t, store)
+	now := time.Now().UTC()
+	stay := checkedOutStay(t, store, "stay1", "key1", user.ID, resource.ID, now)
+
+	first, err := domain.NewSettlement("set_1", stay.ID, 40_000, 0, now)
+	if err != nil {
+		t.Fatalf("NewSettlement() error = %v", err)
+	}
+	if err := store.CreateSettlement(context.Background(), first, audit(now, stay.ID)); err != nil {
+		t.Fatalf("first CreateSettlement() error = %v", err)
+	}
+	loaded, err := store.GetStay(context.Background(), stay.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != domain.StaySettling {
+		t.Fatalf("stay status = %s, want settling", loaded.Status)
+	}
+
+	second, err := domain.NewSettlement("set_2", stay.ID, 40_000, 0, now)
+	if err != nil {
+		t.Fatalf("NewSettlement() error = %v", err)
+	}
+	err = store.CreateSettlement(context.Background(), second, audit(now, stay.ID))
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate CreateSettlement() error = %v, want conflict", err)
+	}
+	count, _ := store.CountTable(context.Background(), "refund_settlements")
+	if count != 1 {
+		t.Fatalf("refund_settlements count = %d, want 1", count)
+	}
+	var persistedID, persistedRefund string
+	if err := store.DB().QueryRow(`SELECT id, refund_cents FROM refund_settlements WHERE stay_id=?`, stay.ID).Scan(&persistedID, &persistedRefund); err != nil {
+		t.Fatal(err)
+	}
+	if persistedID != "set_1" {
+		t.Fatalf("persisted settlement id = %s, want set_1", persistedID)
+	}
+	reloaded, _ := store.GetStay(context.Background(), stay.ID)
+	if reloaded.Version != loaded.Version {
+		t.Fatalf("stay version mutated by rejected settlement = %d, want %d", reloaded.Version, loaded.Version)
+	}
+}

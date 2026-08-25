@@ -28,7 +28,7 @@ func (s *Service) Start(ctx context.Context, stayID, actorID, requestID string) 
 	if err != nil {
 		return domain.RefundSettlement{}, err
 	}
-	if stay.Status != domain.StayCheckedOut && stay.Status != domain.StaySettling {
+	if stay.Status != domain.StayCheckedOut {
 		return domain.RefundSettlement{}, domain.ErrInvalidTransition
 	}
 	paid, err := s.store.SumSucceededPayments(ctx, stayID)

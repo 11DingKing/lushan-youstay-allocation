@@ -147,10 +147,10 @@ func (s *Store) SumSucceededPayments(ctx context.Context, stayID string) (int64,
 
 func (s *Store) CreateSettlement(ctx context.Context, settlement domain.RefundSettlement, event AuditEvent) error {
 	return withTx(ctx, s.db, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO refund_settlements(id,stay_id,paid_cents,damage_cents,refund_cents,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, settlement.ID, settlement.StayID, settlement.PaidCents, settlement.DamageCents, settlement.RefundCents, settlement.Status, settlement.Version, encodeTime(settlement.CreatedAt), encodeTime(settlement.UpdatedAt)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO refund_settlements(id,stay_id,paid_cents,damage_cents,refund_cents,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, settlement.ID, settlement.StayID, settlement.PaidCents, settlement.DamageCents, settlement.RefundCents, settlement.Status, settlement.Version, encodeTime(settlement.CreatedAt), encodeTime(settlement.UpdatedAt)); err != nil {
 			return mapError("create settlement", err)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE stays SET status='settling',version=version+1,updated_at=? WHERE id=?`, encodeTime(settlement.UpdatedAt), settlement.StayID)
+		result, err := tx.ExecContext(ctx, `UPDATE stays SET status='settling',version=version+1,updated_at=? WHERE id=? AND status='checked_out'`, encodeTime(settlement.UpdatedAt), settlement.StayID)
 		if err != nil {
 			return err
 		}
