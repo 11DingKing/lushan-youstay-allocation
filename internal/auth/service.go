@@ -97,11 +97,13 @@ func (s *Service) Logout(ctx context.Context, raw string) error {
 	if raw == "" {
 		return domain.ErrUnauthorized
 	}
-	lookupContext := ctx
-	if ctx.Err() != nil {
-		lookupContext = context.Background()
+	// A request whose context is already cancelled must not destroy a still-usable
+	// session: surface the cancellation to the caller and leave the session intact so
+	// a normal, non-cancelled logout (or a later re-authentication) remains effective.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	session, err := s.store.FindSessionByTokenHash(lookupContext, tokenDigest(raw))
+	session, err := s.store.FindSessionByTokenHash(ctx, tokenDigest(raw))
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
@@ -111,11 +113,7 @@ func (s *Service) Logout(ctx context.Context, raw string) error {
 	if session.RevokedAt != nil {
 		return nil
 	}
-	revokeContext := ctx
-	if ctx.Err() != nil {
-		revokeContext = context.Background()
-	}
-	if err := s.store.RevokeSession(revokeContext, session.ID, s.clock.Now()); err != nil {
+	if err := s.store.RevokeSession(ctx, session.ID, s.clock.Now()); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil

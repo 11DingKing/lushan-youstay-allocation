@@ -288,6 +288,31 @@ func TestAuthenticateRejectsUserDisabledAfterLogin(t *testing.T) {
 	}
 }
 
+func TestLogoutHonorsContextCancellationAndPreservesSession(t *testing.T) {
+	t.Parallel()
+	manual := clock.NewManual(time.Now())
+	store := newAuthStore(activeUser())
+	service := auth.NewService(store, manual, time.Hour)
+	token, _, err := service.Login(context.Background(), "operator", "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.Logout(ctx, token); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Logout() error = %v, want context.Canceled", err)
+	}
+	if _, err := service.Authenticate(context.Background(), token); err != nil {
+		t.Fatalf("Authenticate after cancelled logout error = %v, want session still usable", err)
+	}
+	if err := service.Logout(context.Background(), token); err != nil {
+		t.Fatalf("subsequent Logout() error = %v", err)
+	}
+	if _, err := service.Authenticate(context.Background(), token); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("Authenticate after real logout error = %v, want unauthorized", err)
+	}
+}
+
 func TestAuthenticationHonorsContextCancellation(t *testing.T) {
 	t.Parallel()
 	manual := clock.NewManual(time.Now())
